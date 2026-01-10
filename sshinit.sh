@@ -215,6 +215,19 @@ if [[ "$KEY_MODE" != "skip" ]]; then
 				exit 1
 			fi
 
+			# 立即设置目录所有者和权限
+			chown "$NEW_USER:$NEW_USER" "$SSH_DIR"
+			if [[ $? -ne 0 ]]; then
+				echo "❌ 设置 .ssh 目录所有者失败"
+				exit 1
+			fi
+
+			chmod 700 "$SSH_DIR"
+			if [[ $? -ne 0 ]]; then
+				echo "❌ 设置 .ssh 目录权限失败"
+				exit 1
+			fi
+
 			# 写入公钥
 			if [[ "$KEY_MODE" == "replace" ]]; then
 				echo "$SSH_KEY" > "$AUTHORIZED_KEYS"
@@ -227,13 +240,48 @@ if [[ "$KEY_MODE" != "skip" ]]; then
 				exit 1
 			fi
 
-			# 设置正确的权限
-			chown -R "$NEW_USER:$NEW_USER" "$SSH_DIR"
-			chmod 700 "$SSH_DIR"
-			chmod 600 "$AUTHORIZED_KEYS"
+			# 立即设置公钥文件所有者和权限
+			chown "$NEW_USER:$NEW_USER" "$AUTHORIZED_KEYS"
+			if [[ $? -ne 0 ]]; then
+				echo "❌ 设置 authorized_keys 文件所有者失败"
+				exit 1
+			fi
 
-			echo "✅ SSH 公钥已成功配置"
-			echo "   公钥文件位置: $AUTHORIZED_KEYS"
+			chmod 600 "$AUTHORIZED_KEYS"
+			if [[ $? -ne 0 ]]; then
+				echo "❌ 设置 authorized_keys 文件权限失败"
+				exit 1
+			fi
+
+			# 验证最终权限设置
+			echo ""
+			echo "正在验证权限设置..."
+			ACTUAL_DIR_OWNER=$(stat -c '%U:%G' "$SSH_DIR" 2>/dev/null || stat -f '%Su:%Sg' "$SSH_DIR" 2>/dev/null)
+			ACTUAL_DIR_PERM=$(stat -c '%a' "$SSH_DIR" 2>/dev/null || stat -f '%Lp' "$SSH_DIR" 2>/dev/null)
+			ACTUAL_FILE_OWNER=$(stat -c '%U:%G' "$AUTHORIZED_KEYS" 2>/dev/null || stat -f '%Su:%Sg' "$AUTHORIZED_KEYS" 2>/dev/null)
+			ACTUAL_FILE_PERM=$(stat -c '%a' "$AUTHORIZED_KEYS" 2>/dev/null || stat -f '%Lp' "$AUTHORIZED_KEYS" 2>/dev/null)
+
+			echo "  📁 $SSH_DIR"
+			echo "     所有者: $ACTUAL_DIR_OWNER (期望: $NEW_USER:$NEW_USER)"
+			echo "     权限: $ACTUAL_DIR_PERM (期望: 700)"
+			echo "  📄 $AUTHORIZED_KEYS"
+			echo "     所有者: $ACTUAL_FILE_OWNER (期望: $NEW_USER:$NEW_USER)"
+			echo "     权限: $ACTUAL_FILE_PERM (期望: 600)"
+
+			# 检查权限是否正确
+			if [[ "$ACTUAL_DIR_OWNER" != "$NEW_USER:$NEW_USER" ]] || [[ "$ACTUAL_DIR_PERM" != "700" ]]; then
+				echo ""
+				echo "❌ 警告: .ssh 目录权限设置不正确！"
+				echo "   这可能导致 SSH 登录失败，请手动检查"
+			elif [[ "$ACTUAL_FILE_OWNER" != "$NEW_USER:$NEW_USER" ]] || [[ "$ACTUAL_FILE_PERM" != "600" ]]; then
+				echo ""
+				echo "❌ 警告: authorized_keys 文件权限设置不正确！"
+				echo "   这可能导致 SSH 登录失败，请手动检查"
+			else
+				echo ""
+				echo "✅ SSH 公钥已成功配置，权限验证通过"
+				echo "   公钥文件位置: $AUTHORIZED_KEYS"
+			fi
 		fi
 	fi
 fi
