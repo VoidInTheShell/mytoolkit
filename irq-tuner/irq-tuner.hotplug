@@ -1,0 +1,19 @@
+#!/bin/sh
+
+[ "$ACTION" = "ifup" ] || exit 0
+[ -x /usr/sbin/irq-tuner ] || exit 0
+
+if [ -f /etc/irq-tuner/irq-tuner.conf ]; then
+  # shellcheck disable=SC1091
+  . /etc/irq-tuner/irq-tuner.conf
+fi
+
+[ "${ENABLE:-1}" -eq 1 ] || exit 0
+
+dev="${DEVICE:-$INTERFACE}"
+for iface in ${IFACES:-}; do
+  if [ "$dev" = "$iface" ]; then
+    /usr/sbin/irq-tuner apply --iface "$iface" --quiet
+    exit 0
+  fi
+done

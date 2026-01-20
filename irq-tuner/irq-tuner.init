@@ -1,0 +1,14 @@
+#!/bin/sh /etc/rc.common
+
+START=99
+STOP=10
+
+start() {
+  [ -x /usr/sbin/irq-tuner ] || return 0
+  /usr/sbin/irq-tuner apply --quiet
+}
+
+stop() {
+  [ -x /usr/sbin/irq-tuner ] || return 0
+  /usr/sbin/irq-tuner rollback --quiet
+}
