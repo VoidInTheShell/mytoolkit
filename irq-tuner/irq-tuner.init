@@ -1,14 +1,37 @@
 #!/bin/sh /etc/rc.common
 
-START=99
+START=100
 STOP=10
 
 start() {
   [ -x /usr/sbin/irq-tuner ] || return 0
-  /usr/sbin/irq-tuner apply --quiet
+
+  # Load configuration
+  CONFIG_FILE="/etc/irq-tuner/irq-tuner.conf"
+  if [ -f "$CONFIG_FILE" ]; then
+    # shellcheck disable=SC1090
+    . "$CONFIG_FILE"
+  fi
+
+  # Check if tuning is enabled (same as hotplug script)
+  [ "${ENABLE:-1}" -eq 1 ] || {
+    logger -t irq-tuner -p daemon.info "Init: ENABLE=0, skipping initialization"
+    return 0
+  }
+
+  # Set global sysctl configuration
+  if [ -n "${RPS_SOCK_FLOW_ENTRIES:-}" ]; then
+    sysctl -w net.core.rps_sock_flow_entries="$RPS_SOCK_FLOW_ENTRIES" >/dev/null 2>&1
+    logger -t irq-tuner -p daemon.info "Init: Set global rps_sock_flow_entries=$RPS_SOCK_FLOW_ENTRIES"
+  fi
+
+  # Interface-specific tuning will be handled by hotplug when interfaces come up
+  # This avoids race conditions with network initialization
+  logger -t irq-tuner -p daemon.info "Init: Global configuration applied, waiting for hotplug events"
 }
 
 stop() {
   [ -x /usr/sbin/irq-tuner ] || return 0
   /usr/sbin/irq-tuner rollback --quiet
+  logger -t irq-tuner -p daemon.info "Init: Rollback completed"
 }

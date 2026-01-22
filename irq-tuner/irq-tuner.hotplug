@@ -1,8 +1,11 @@
 #!/bin/sh
+# irq-tuner hotplug script with race condition fix
+# Waits for driver initialization before applying settings
 
 [ "$ACTION" = "ifup" ] || exit 0
 [ -x /usr/sbin/irq-tuner ] || exit 0
 
+# Load configuration
 if [ -f /etc/irq-tuner/irq-tuner.conf ]; then
   # shellcheck disable=SC1091
   . /etc/irq-tuner/irq-tuner.conf
@@ -10,10 +13,120 @@ fi
 
 [ "${ENABLE:-1}" -eq 1 ] || exit 0
 
-dev="${DEVICE:-$INTERFACE}"
+# Debug: Log hotplug invocation
+logger -t irq-tuner-hotplug -p daemon.debug "Called: ACTION=$ACTION INTERFACE=$INTERFACE DEVICE=${DEVICE:-N/A}"
+
+# Wait for queue sysfs nodes to be ready
+wait_queue_ready() {
+  iface="$1"
+  max_wait="${2:-5}"
+
+  # First check if queues directory exists at all
+  if ! [ -d "/sys/class/net/$iface/queues" ]; then
+    logger -t irq-tuner -p daemon.warning "$iface has no queues directory, may not support RSS/RPS"
+    return 0  # Continue anyway, some interfaces don't have queues
+  fi
+
+  i=1
+  while [ "$i" -le "$max_wait" ]; do
+    if [ -d "/sys/class/net/$iface/queues/rx-0" ]; then
+      logger -t irq-tuner -p daemon.info "$iface queues ready after ${i}s"
+      return 0
+    fi
+    sleep 1
+    i=$((i + 1))
+  done
+
+  logger -t irq-tuner -p daemon.warning "$iface queues not ready after ${max_wait}s, continuing anyway"
+  return 0  # Changed from return 1 - don't fail hard
+}
+
+# Wait for MSI-X interrupts to be registered
+wait_msix_ready() {
+  iface="$1"
+  max_wait="${2:-5}"
+
+  i=1
+  while [ "$i" -le "$max_wait" ]; do
+    if grep -Fq "${iface}-fp-" /proc/interrupts 2>/dev/null; then
+      logger -t irq-tuner -p daemon.info "$iface MSI-X ready after ${i}s"
+      return 0
+    fi
+    if grep -Fq "$iface" /proc/interrupts 2>/dev/null; then
+      logger -t irq-tuner -p daemon.info "$iface IRQs present (non -fp), continuing after ${i}s"
+      return 0
+    fi
+    sleep 1
+    i=$((i + 1))
+  done
+
+  logger -t irq-tuner -p daemon.warning "$iface MSI-X not ready after ${max_wait}s, continuing"
+  return 0
+}
+
+# Main logic
+# Try to get physical device name
+# Priority: DEVICE variable > query INTERFACE binding
+dev="${DEVICE}"
+
+# Check if dev is a valid physical device by checking /sys/class/net/
+# If not, or if dev is empty, try to resolve from INTERFACE
+if [ -z "$dev" ] || ! [ -d "/sys/class/net/$dev" ]; then
+  if [ -n "$INTERFACE" ]; then
+    # Try multiple resolution methods for robustness
+
+    # Method 1: UCI device option (modern OpenWrt)
+    dev=$(/sbin/uci -q get network."$INTERFACE".device 2>/dev/null)
+    logger -t irq-tuner-hotplug -p daemon.debug "Resolved $INTERFACE via .device: ${dev:-N/A}"
+
+    # Method 2: UCI ifname option (older OpenWrt) - fallback
+    if [ -z "$dev" ]; then
+      dev=$(/sbin/uci -q get network."$INTERFACE".ifname 2>/dev/null)
+      logger -t irq-tuner-hotplug -p daemon.debug "Resolved $INTERFACE via .ifname: ${dev:-N/A}"
+    fi
+
+    # Method 3: ubus query (most reliable) - fallback
+    if [ -z "$dev" ] && command -v ubus >/dev/null 2>&1; then
+      dev=$(ubus call network.interface."$INTERFACE" status 2>/dev/null | jsonfilter -e '@.device' 2>/dev/null)
+      logger -t irq-tuner-hotplug -p daemon.debug "Resolved $INTERFACE via ubus: ${dev:-N/A}"
+    fi
+  fi
+fi
+
+# Final fallback to INTERFACE if still not resolved
+dev="${dev:-$INTERFACE}"
+
+# Verify the final device exists
+if [ -n "$dev" ] && [ -d "/sys/class/net/$dev" ]; then
+  logger -t irq-tuner-hotplug -p daemon.debug "Final device to process: $dev (verified)"
+else
+  logger -t irq-tuner-hotplug -p daemon.warning "Device $dev not found in /sys/class/net/, skipping"
+  exit 0
+fi
+
+# Only process configured interfaces
 for iface in ${IFACES:-}; do
   if [ "$dev" = "$iface" ]; then
-    /usr/sbin/irq-tuner apply --iface "$iface" --quiet
+    logger -t irq-tuner -p daemon.info "Triggered for $iface"
+
+    # Wait for driver initialization (warnings logged but don't fail)
+    wait_queue_ready "$iface" 5
+    wait_msix_ready "$iface" 5
+
+    # Ensure global RPS configuration (may have been reset)
+    if [ -n "${RPS_SOCK_FLOW_ENTRIES:-}" ]; then
+      echo "$RPS_SOCK_FLOW_ENTRIES" > /proc/sys/net/core/rps_sock_flow_entries 2>/dev/null
+    fi
+
+    # Apply tuning and check return code
+    if /usr/sbin/irq-tuner apply --iface "$iface" --quiet; then
+      logger -t irq-tuner -p daemon.info "$iface tuning applied successfully"
+    else
+      logger -t irq-tuner -p daemon.err "$iface tuning apply failed (exit code: $?)"
+      exit 1
+    fi
     exit 0
   fi
 done
+
+logger -t irq-tuner-hotplug -p daemon.debug "Device $dev not in IFACES ($IFACES), skipping"

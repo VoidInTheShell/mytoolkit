@@ -132,7 +132,7 @@ get_combined_current() {
 
 get_irqs_for_iface() {
   iface="$1"
-  irqs="$(grep -E "[[:space:]]${iface}-fp-" /proc/interrupts 2>/dev/null | awk '{gsub(":","",$1); print $1}')"
+  irqs="$(grep -F " ${iface}-fp-" /proc/interrupts 2>/dev/null | awk '{gsub(":","",$1); print $1}')"
   if [ -z "$irqs" ]; then
     irqs="$(grep -E "[[:space:]]${iface}($|[^-])" /proc/interrupts 2>/dev/null | awk '{gsub(":","",$1); print $1}')"
   fi
@@ -219,13 +219,30 @@ apply_rps_xps() {
     rps_flow="0"
   fi
 
+  # Write rps_cpus with retry logic
   for path in /sys/class/net/"$iface"/queues/rx-*/rps_cpus; do
-    [ -w "$path" ] || continue
-    echo "$rps_cpus" > "$path" 2>/dev/null
+    [ -e "$path" ] || continue
+    retry=0
+    while [ "$retry" -lt 3 ]; do
+      if [ -w "$path" ] && echo "$rps_cpus" > "$path" 2>/dev/null; then
+        break
+      fi
+      retry=$((retry + 1))
+      [ "$retry" -lt 3 ] && sleep 1
+    done
   done
+
+  # Write rps_flow_cnt with retry logic
   for path in /sys/class/net/"$iface"/queues/rx-*/rps_flow_cnt; do
-    [ -w "$path" ] || continue
-    echo "$rps_flow" > "$path" 2>/dev/null
+    [ -e "$path" ] || continue
+    retry=0
+    while [ "$retry" -lt 3 ]; do
+      if [ -w "$path" ] && echo "$rps_flow" > "$path" 2>/dev/null; then
+        break
+      fi
+      retry=$((retry + 1))
+      [ "$retry" -lt 3 ] && sleep 1
+    done
   done
 
   if [ "$XPS_MODE" = "off" ]; then
@@ -295,11 +312,21 @@ apply_tuning() {
   fi
   save_baseline_once
   set_sysctl net.core.rps_sock_flow_entries "$RPS_SOCK_FLOW_ENTRIES"
+
+  # Verify sysctl took effect
+  actual=$(cat /proc/sys/net/core/rps_sock_flow_entries 2>/dev/null)
+  if [ "$actual" != "$RPS_SOCK_FLOW_ENTRIES" ]; then
+    # Retry if verification failed
+    set_sysctl net.core.rps_sock_flow_entries "$RPS_SOCK_FLOW_ENTRIES"
+  fi
+
   for iface in $IFACES; do
     [ -d "/sys/class/net/$iface" ] || continue
     [ -n "$iface_only" ] && [ "$iface" != "$iface_only" ] && continue
     if command -v ethtool >/dev/null 2>&1; then
       ethtool -L "$iface" combined "$COMBINED" >/dev/null 2>&1
+      # Wait for driver to process queue reconfiguration
+      sleep 1
     fi
     apply_rps_xps "$iface"
   done
@@ -419,11 +446,20 @@ uninstall_all() {
   restore_baseline
   /etc/init.d/irq-tuner stop >/dev/null 2>&1
   /etc/init.d/irq-tuner disable >/dev/null 2>&1
+
+  # Stop and remove watchdog from crontab
+  if command -v crontab >/dev/null 2>&1; then
+    crontab -l 2>/dev/null | grep -v irq-tuner-watchdog | crontab - 2>/dev/null
+  fi
+
+  # Remove all files
   rm -f /etc/init.d/irq-tuner \
         /etc/hotplug.d/iface/99-irq-tuner \
-        /etc/sysctl.d/99-irq-tuner.conf
+        /etc/sysctl.d/99-irq-tuner.conf \
+        /usr/sbin/irq-tuner-watchdog
   rm -rf "$CONFIG_DIR"
-  msg "已卸载 irq-tuner."
+
+  msg "已卸载 irq-tuner（含watchdog）."
   if [ "${PURGE_SELF:-0}" -eq 1 ]; then
     rm -f /usr/sbin/irq-tuner
   fi

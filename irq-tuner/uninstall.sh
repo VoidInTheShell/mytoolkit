@@ -7,6 +7,14 @@ if [ "$(id -u)" -ne 0 ]; then
   exit 1
 fi
 
+echo "开始卸载 irq-tuner..."
+
+# Stop watchdog (remove from crontab)
+if command -v crontab >/dev/null 2>&1; then
+  echo "停止watchdog..."
+  crontab -l 2>/dev/null | grep -v irq-tuner-watchdog | crontab - 2>/dev/null || true
+fi
+
 if [ -x /usr/sbin/irq-tuner ]; then
   /usr/sbin/irq-tuner uninstall
   exit 0
@@ -59,8 +67,17 @@ fi
 rm -f /etc/init.d/irq-tuner \
       /etc/hotplug.d/iface/99-irq-tuner \
       /etc/sysctl.d/99-irq-tuner.conf \
-      /usr/sbin/irq-tuner
+      /usr/sbin/irq-tuner \
+      /usr/sbin/irq-tuner-watchdog
 
 rm -rf "$CONFIG_DIR"
 
-echo "已卸载 irq-tuner."
+echo "完全卸载完成！"
+echo ""
+echo "已移除的组件："
+echo "  - irq-tuner主脚本"
+echo "  - hotplug脚本"
+echo "  - init脚本"
+echo "  - watchdog脚本"
+echo "  - 配置文件"
+echo "  - 状态文件"
